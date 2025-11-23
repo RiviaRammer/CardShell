@@ -1,2 +1,11 @@
 # CardShell
-A console based on Cardputer and libssh.
+A Console based on Cardputer.
+![示例](images/screen.jpeg)
+
+
+## Installation
+
+- **Board:** M5Stack  
+- **Libraries:** M5Cardputer (and all required dependencies)
+
+## 

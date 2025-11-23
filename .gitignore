@@ -1,0 +1,2 @@
+# Ignore PlatformIO generated secrets (if any)
+src/CardShell/config.h

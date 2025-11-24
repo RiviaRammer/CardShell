@@ -8,6 +8,7 @@
 
 #include "config.h"
 #include "handle_char.h"
+#include "storage.h"
 
 //==================================================
 //   SSH 配置
@@ -23,8 +24,21 @@ ssh_channel g_channel = nullptr;
 const uint32_t SSH_TASK_STACK_SIZE = 51200;
 
 //==================================================
+//   WiFi 配置
+//==================================================
+
+String wifi_ssid = WIFI_CONFIG_SSID;
+String wifi_pass = WIFI_CONFIG_PASSWORD;
+
+
+
+//==================================================
 //   函数声明
 //==================================================
+int bootMenu();
+void startSSHMode();
+void startUSBMode();
+
 void waitForInput(String &input, bool hideInput);
 void flushKeyboard();
 
@@ -32,6 +46,11 @@ void connectWiFi();
 void connectSSH();
 
 void sshTask(void *pv);
+
+
+//==================================================
+//   MAIN
+//==================================================
 
 void setup() {
     Serial.begin(115200);
@@ -42,15 +61,33 @@ void setup() {
     M5Cardputer.Display.setRotation(1);
     M5Cardputer.Display.fillScreen(BLACK);
 
-    termClear();
-    termPrintln("\x1B[36m=== M5Cardputer SSH Shell ===\x1B[0m");
+    // ================================
+    //   检查是否按住 G0 进入菜单
+    // ================================
+    M5.update();
+    bool pressed = M5.BtnA.isPressed();
 
-    connectWiFi();
+    if (pressed) {
+        int mode = bootMenu();
 
-    xTaskCreatePinnedToCore(
-        sshTask, "sshTask", SSH_TASK_STACK_SIZE,
-        nullptr, 1, nullptr, 1
-    );
+        if (mode == 1) {
+            startUSBMode();
+        }
+        else if (mode == 2) {
+            // nothing
+        }
+        else if (mode == 3) { // delete SSH config
+            g_ssh_host = "";
+            g_ssh_user = "";
+            g_ssh_password = "";
+        }
+        else if (mode == 4) { // delete WiFi config
+            wifi_ssid.clear();
+            wifi_pass.clear();
+        }
+    }
+
+    startSSHMode();
 }
 
 void loop() {
@@ -210,9 +247,6 @@ void connectWiFi() {
 
     while (true) {
 
-        String wifi_ssid = WIFI_CONFIG_SSID;
-        String wifi_pass = WIFI_CONFIG_PASSWORD;
-
         if (wifi_ssid.isEmpty()) {
             termPrint("Enter WiFi SSID:");
             waitForInput(wifi_ssid, false);
@@ -242,4 +276,63 @@ void connectWiFi() {
 
         termPrintln("\x1B[31mWiFi Failed! Please try again.\x1B[0m");
     }
+}
+
+
+int bootMenu()
+{
+    M5Cardputer.Display.clear(BLACK);
+    M5Cardputer.Display.setCursor(0, 0);
+
+    M5Cardputer.Display.println("== CardShell Boot Menu ==");
+    M5Cardputer.Display.println("1) USB Storage Mode");
+    M5Cardputer.Display.println("2) SSH Shell (config)");
+    M5Cardputer.Display.println("3) SSH Shell (manual)");
+    M5Cardputer.Display.println("4) Reset Wi-Fi");
+    M5Cardputer.Display.println();
+    M5Cardputer.Display.println("Press 1, 2 or 3...");
+    M5Cardputer.Display.println();
+
+    while (true) {
+        M5Cardputer.update();
+        auto st = M5Cardputer.Keyboard.keysState();
+
+        if (!st.word.empty()) {
+            char c = st.word.front();
+            if (c == '1') return 1;
+            if (c == '2') return 2;
+            if (c == '3') return 3;
+            if (c == '4') return 4;
+        }
+        delay(20);
+    }
+}
+
+void startUSBMode()
+{
+    // storage_mountMCU();    // 挂载 Flash（用于导入文件）
+    // storage_mountPC();     // 挂载 USB MSC（自动格式化 FAT12）
+
+    M5Cardputer.Display.clear(BLACK);
+    M5Cardputer.Display.println("USB Storage Mode");
+    M5Cardputer.Display.println("Linux/Mac/Win can mount now.");
+    M5Cardputer.Display.println("Files auto-import to LittleFS.");
+
+    while (true) {
+        //storage_task();   // 自动导入 FAT12 文件
+        delay(50);
+    }
+}
+
+void startSSHMode()
+{
+    termPrintln("\x1B[36m== CardShell ==\x1B[0m");
+
+    connectWiFi();
+
+    xTaskCreatePinnedToCore(
+        sshTask, "sshTask", SSH_TASK_STACK_SIZE,
+        nullptr, 1, nullptr, 1
+    );
+
 }

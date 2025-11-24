@@ -8,4 +8,6 @@ A Console based on Cardputer.
 - **Board:** M5Stack  
 - **Libraries:** M5Cardputer (and all required dependencies)
 
-## 
+## Mode
+
+- Press G0 after reset Cardputer

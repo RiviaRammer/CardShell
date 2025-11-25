@@ -8,6 +8,17 @@ A Console based on Cardputer.
 - **Board:** M5Stack  
 - **Libraries:** M5Cardputer (and all required dependencies)
 
+## Setting
+
+- **Partition Scheme:** Huge APP: (3MB No OTA/1MB SPIFFS)  
+
 ## Mode
 
 - Press G0 after reset Cardputer
+
+## Notice
+- Only support PEM Private Key
+```bash
+-----BEGIN RSA PRIVATE KEY-----
+-----END RSA PRIVATE KEY-----
+```

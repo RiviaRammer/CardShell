@@ -1,4 +1,6 @@
 #include <WiFi.h>
+#include <LittleFS.h>
+
 #include <M5Cardputer.h>
 #include "libssh_esp32.h"
 #include <libssh/libssh.h>
@@ -53,6 +55,7 @@ void sshTask(void *pv);
 //==================================================
 
 void setup() {
+
     Serial.begin(115200);
     delay(100);
 
@@ -62,26 +65,20 @@ void setup() {
     M5Cardputer.Display.fillScreen(BLACK);
 
     // ================================
-    //   检查是否按住 G0 进入菜单
+    //   按键启动菜单
     // ================================
     M5.update();
     bool pressed = M5.BtnA.isPressed();
 
     if (pressed) {
         int mode = bootMenu();
-
-        if (mode == 1) {
-            startUSBMode();
-        }
-        else if (mode == 2) {
-            // nothing
-        }
-        else if (mode == 3) { // delete SSH config
+        if (mode == 1) startUSBMode();
+        else if (mode == 3) {
             g_ssh_host = "";
             g_ssh_user = "";
             g_ssh_password = "";
         }
-        else if (mode == 4) { // delete WiFi config
+        else if (mode == 4) {
             wifi_ssid.clear();
             wifi_pass.clear();
         }
@@ -89,6 +86,7 @@ void setup() {
 
     startSSHMode();
 }
+
 
 void loop() {
     vTaskDelay(1000 / portTICK_PERIOD_MS);
@@ -193,41 +191,99 @@ void connectSSH() {
             waitForInput(g_ssh_user, false);
         }
 
-        if (g_ssh_password.isEmpty()) {
-            termPrint("SSH Password:");
-            waitForInput(g_ssh_password, true);
-        }
-
-        // 创建 session
+        // --------------------------
+        //  Create Session
+        // --------------------------
         g_session = ssh_new();
         ssh_options_set(g_session, SSH_OPTIONS_HOST, g_ssh_host.c_str());
         ssh_options_set(g_session, SSH_OPTIONS_USER, g_ssh_user.c_str());
 
-        // 尝试连接
+        // Connect
+        termPrintln("\x1B[36mConnecting SSH...\x1B[0m");
         if (ssh_connect(g_session) != SSH_OK) {
-            termPrintln("\x1B[31mSSH connect failed. Please re-enter host.\x1B[0m");
+            termPrintln("\x1B[31mSSH connect failed. Re-enter host.\x1B[0m");
             ssh_free(g_session);
             g_ssh_host = "";
             continue;
         }
 
-        // 认证
-        if (ssh_userauth_password(g_session, nullptr, g_ssh_password.c_str()) != SSH_AUTH_SUCCESS) {
-            termPrintln("\x1B[31mSSH authentication failed. Enter password again.\x1B[0m");
-            ssh_disconnect(g_session);
-            ssh_free(g_session);
-            g_ssh_password = "";
-            continue;
+        // ====================================================
+        //   Try KEY AUTH First
+        // ====================================================
+        bool keyOK = false;
+        if (LittleFS.begin(true) && LittleFS.exists("/ssh_key")) {
+
+            termPrintln("\x1B[33mAuth Mode: Trying KEY authentication...\x1B[0m");
+
+            File f = LittleFS.open("/ssh_key", "r");
+            if (f) {
+                size_t len = f.size();
+                uint8_t *keyBuf = (uint8_t *)malloc(len + 1);
+                f.read(keyBuf, len);
+                keyBuf[len] = 0;
+                f.close();
+
+                ssh_key privKey = nullptr;
+
+                if (ssh_pki_import_privkey_base64(
+                        (const char *)keyBuf,
+                        nullptr,   // no passphrase
+                        nullptr, nullptr,
+                        &privKey
+                    ) == SSH_OK)
+                {
+                    if (ssh_userauth_publickey(g_session, nullptr, privKey) == SSH_AUTH_SUCCESS) {
+                        termPrintln("\x1B[32mKEY authentication success!\x1B[0m");
+                        keyOK = true;
+                    } else {
+                        termPrintln("\x1B[31mKEY authentication failed.\x1B[0m");
+                    }
+                } else {
+                    termPrintln("\x1B[31mFailed to import private key.\x1B[0m");
+                }
+
+                if (privKey) ssh_key_free(privKey);
+                free(keyBuf);
+            }
+        } else {
+            termPrintln("\x1B[33mNo /ssh_key file, skipping key authentication.\x1B[0m");
         }
 
-        // SSH channel
+        // ====================================================
+        //   If KEY auth OK → goto channel
+        //   Else try PASSWORD auth
+        // ====================================================
+        if (!keyOK) {
+
+            if (g_ssh_password.isEmpty()) {
+                termPrint("SSH Password:");
+                waitForInput(g_ssh_password, true);
+            }
+            
+            termPrintln("\x1B[33mAuth Mode: Trying PASSWORD authentication...\x1B[0m");
+
+            if (ssh_userauth_password(g_session, nullptr, g_ssh_password.c_str()) != SSH_AUTH_SUCCESS) {
+                termPrintln("\x1B[31mPassword authentication failed. Enter password again.\x1B[0m");
+                ssh_disconnect(g_session);
+                ssh_free(g_session);
+                g_ssh_password = "";
+                continue;
+            }
+
+            termPrintln("\x1B[32mPassword authentication success!\x1B[0m");
+        }
+
+        // ====================================================
+        //   Open SSH channel
+        // ====================================================
         g_channel = ssh_channel_new(g_session);
         if (!g_channel ||
             ssh_channel_open_session(g_channel) != SSH_OK ||
             ssh_channel_request_pty(g_channel) != SSH_OK ||
-            ssh_channel_request_shell(g_channel) != SSH_OK) {
-
+            ssh_channel_request_shell(g_channel) != SSH_OK)
+        {
             termPrintln("\x1B[31mSSH PTY/Shell failed. Re-enter info.\x1B[0m");
+
             ssh_disconnect(g_session);
             ssh_free(g_session);
 
@@ -241,6 +297,7 @@ void connectSSH() {
         return;
     }
 }
+
 
 
 void connectWiFi() {
@@ -257,7 +314,7 @@ void connectWiFi() {
             waitForInput(wifi_pass, true);
         }
 
-        termPrintln("\x1B[36mConnecting WiFi...\x1B[0m");
+        termPrintln("\x1B[36mConnecting WiFi...");
         WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
 
         int retry = 0;
@@ -310,24 +367,27 @@ int bootMenu()
 
 void startUSBMode()
 {
-    // storage_mountMCU();    // 挂载 Flash（用于导入文件）
-    // storage_mountPC();     // 挂载 USB MSC（自动格式化 FAT12）
+    storage_mountMCU();
+    storage_mountPC();
 
     M5Cardputer.Display.clear(BLACK);
+    M5Cardputer.Display.setCursor(0, 0);   // ← 光标回到左上角
     M5Cardputer.Display.println("USB Storage Mode");
-    M5Cardputer.Display.println("Linux/Mac/Win can mount now.");
-    M5Cardputer.Display.println("Files auto-import to LittleFS.");
+    M5Cardputer.Display.println("");
+    M5Cardputer.Display.println("Copy SSH key here from PC.");
+    M5Cardputer.Display.println("Then eject the drive.");
+    M5Cardputer.Display.println("Key will be imported to /ssh_key.");
 
     while (true) {
-        //storage_task();   // 自动导入 FAT12 文件
+        storage_task();   // 这里会在弹出后导入 key
         delay(50);
     }
 }
 
+
 void startSSHMode()
 {
     termPrintln("\x1B[36m== CardShell ==\x1B[0m");
-
     connectWiFi();
 
     xTaskCreatePinnedToCore(

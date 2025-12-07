@@ -11,6 +11,7 @@ A Console based on Cardputer.
 ## Setting
 
 - **Partition Scheme:** Huge APP: (3MB No OTA/1MB SPIFFS)  
+- **Flash Size:** 8MB(64Mb)  
 
 ## Mode
 

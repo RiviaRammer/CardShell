@@ -16,6 +16,7 @@
 //   SSH 配置
 //==================================================
 String g_ssh_host     = SSH_CONFIG_HOST;
+String g_ssh_port     = String(SSH_CONFIG_PORT);
 String g_ssh_user     = SSH_CONFIG_USER;
 String g_ssh_password = SSH_CONFIG_PASSWORD;
 
@@ -46,6 +47,7 @@ void flushKeyboard();
 
 void connectWiFi();
 void connectSSH();
+void resetSSHConfig();
 
 void sshTask(void *pv);
 
@@ -74,9 +76,7 @@ void setup() {
         int mode = bootMenu();
         if (mode == 1) startUSBMode();
         else if (mode == 3) {
-            g_ssh_host = "";
-            g_ssh_user = "";
-            g_ssh_password = "";
+            resetSSHConfig();
         }
         else if (mode == 4) {
             wifi_ssid.clear();
@@ -177,6 +177,57 @@ void waitForInput(String &input, bool hideInput) {
     }
 }
 
+bool parseSSHPort(int &port) {
+    if (g_ssh_port.isEmpty()) return false;
+
+    for (int i = 0; i < g_ssh_port.length(); i++) {
+        char ch = g_ssh_port[i];
+        if (ch < '0' || ch > '9') return false;
+    }
+
+    port = g_ssh_port.toInt();
+    return port > 0 && port <= 65535;
+}
+
+void promptSSHPort() {
+    while (true) {
+        if (g_ssh_port.isEmpty()) {
+            termPrint("SSH Port(22):");
+            waitForInput(g_ssh_port, false);
+            if (g_ssh_port.isEmpty()) {
+                g_ssh_port = "22";
+            }
+        }
+
+        int ssh_port = 0;
+        if (parseSSHPort(ssh_port)) return;
+
+        termPrintln("\x1B[31mInvalid SSH port. Enter again.\x1B[0m");
+        g_ssh_port = "";
+    }
+}
+
+void resetSSHConfig() {
+    termClear();
+    termPrintln("\x1B[36m== Reset SSH Config ==\x1B[0m");
+
+    g_ssh_host = "";
+    g_ssh_port = "";
+    g_ssh_user = "";
+    g_ssh_password = "";
+
+    termPrint("SSH Host:");
+    waitForInput(g_ssh_host, false);
+
+    promptSSHPort();
+
+    termPrint("SSH User:");
+    waitForInput(g_ssh_user, false);
+
+    termPrint("SSH Password:");
+    waitForInput(g_ssh_password, true);
+}
+
 void connectSSH() {
 
     while (true) {
@@ -186,16 +237,22 @@ void connectSSH() {
             waitForInput(g_ssh_host, false);
         }
 
+        promptSSHPort();
+
         if (g_ssh_user.isEmpty()) {
             termPrint("SSH User:");
             waitForInput(g_ssh_user, false);
         }
+
+        int ssh_port = 0;
+        parseSSHPort(ssh_port);
 
         // --------------------------
         //  Create Session
         // --------------------------
         g_session = ssh_new();
         ssh_options_set(g_session, SSH_OPTIONS_HOST, g_ssh_host.c_str());
+        ssh_options_set(g_session, SSH_OPTIONS_PORT, &ssh_port);
         ssh_options_set(g_session, SSH_OPTIONS_USER, g_ssh_user.c_str());
 
         // Connect
@@ -204,6 +261,7 @@ void connectSSH() {
             termPrintln("\x1B[31mSSH connect failed. Re-enter host.\x1B[0m");
             ssh_free(g_session);
             g_ssh_host = "";
+            g_ssh_port = "";
             continue;
         }
 
@@ -288,6 +346,7 @@ void connectSSH() {
             ssh_free(g_session);
 
             g_ssh_host = "";
+            g_ssh_port = "";
             g_ssh_user = "";
             g_ssh_password = "";
             continue;
@@ -344,10 +403,10 @@ int bootMenu()
     M5Cardputer.Display.println("== CardShell Boot Menu ==");
     M5Cardputer.Display.println("1) USB Storage Mode");
     M5Cardputer.Display.println("2) SSH Shell (config)");
-    M5Cardputer.Display.println("3) SSH Shell (manual)");
+    M5Cardputer.Display.println("3) Reset SSH Config");
     M5Cardputer.Display.println("4) Reset Wi-Fi");
     M5Cardputer.Display.println();
-    M5Cardputer.Display.println("Press 1, 2 or 3...");
+    M5Cardputer.Display.println("Press 1, 2, 3 or 4...");
     M5Cardputer.Display.println();
 
     while (true) {

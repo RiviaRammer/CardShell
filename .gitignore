@@ -1,3 +1,9 @@
 # Ignore PlatformIO generated secrets (if any)
 src/CardShell/config.h
 src/CardShell/.codex
+src/Cardputer/config.h
+src/Tab5/config.h
+
+# Codex/local build artifacts
+.codex_build/
+.codex_tmp/

@@ -103,6 +103,8 @@ void resetSSHConfig();
 void sshTask(void *pv);
 void waitForInput(String &input, bool hideInput);
 void flushKeyboard();
+void redrawInputTail(const String &input, int cursor, bool hideInput);
+void moveInputCursorLeft(int count);
 bool setupTab5Keyboard();
 bool setTab5KeyboardMode(Mode mode);
 bool checkBootKeyboardReset(bool &resetWifi);
@@ -315,9 +317,26 @@ void flushKeyboard() {
     }
 }
 
+void moveInputCursorLeft(int count) {
+    while (count-- > 0) {
+        termPrint("\x1B[D");
+    }
+}
+
+void redrawInputTail(const String &input, int cursor, bool hideInput) {
+    termPrint("\x1B[K");
+
+    for (int i = cursor; i < input.length(); ++i) {
+        termPrint(hideInput ? "*" : String(input[i]));
+    }
+
+    moveInputCursorLeft(input.length() - cursor);
+}
+
 void waitForInput(String &input, bool hideInput) {
     flushKeyboard();
     input = "";
+    int cursor = 0;
 
     while (true) {
         M5.update();
@@ -325,17 +344,49 @@ void waitForInput(String &input, bool hideInput) {
 
         KeyInput key;
         if (readKeyInput(key)) {
-            if (key.backspace && input.length() > 0) {
-                input.remove(input.length() - 1);
-                termPrint("\b \b");
+            if (key.backspace && cursor > 0) {
+                --cursor;
+                input.remove(cursor, 1);
+                termPrint("\x1B[D");
+                redrawInputTail(input, cursor, hideInput);
             }
 
             if (key.text.length()) {
                 for (int i = 0; i < key.text.length(); ++i) {
                     char ch = key.text[i];
+                    if (ch == '\x1B' && i + 2 < key.text.length() && key.text[i + 1] == '[') {
+                        char cmd = key.text[i + 2];
+                        if (cmd == 'D') {
+                            if (cursor > 0) {
+                                --cursor;
+                                termPrint("\x1B[D");
+                            }
+                            i += 2;
+                            continue;
+                        }
+                        if (cmd == 'C') {
+                            if (cursor < input.length()) {
+                                ++cursor;
+                                termPrint("\x1B[C");
+                            }
+                            i += 2;
+                            continue;
+                        }
+                        if (cmd == '3' && i + 3 < key.text.length() && key.text[i + 3] == '~') {
+                            if (cursor < input.length()) {
+                                input.remove(cursor, 1);
+                                redrawInputTail(input, cursor, hideInput);
+                            }
+                            i += 3;
+                            continue;
+                        }
+                    }
+
                     if (ch < 0x20 || ch > 0x7E) continue;
-                    input += ch;
+                    input = input.substring(0, cursor) + String(ch) + input.substring(cursor);
+                    ++cursor;
                     termPrint(hideInput ? "*" : String(ch));
+                    redrawInputTail(input, cursor, hideInput);
                 }
             }
 

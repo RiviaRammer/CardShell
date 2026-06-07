@@ -4,6 +4,12 @@
 
 namespace {
 
+struct Cell {
+    char ch = ' ';
+    uint16_t fg = WHITE;
+    uint16_t bg = BLACK;
+};
+
 bool ansiInEsc = false;
 bool ansiInCsi = false;
 bool ansiInOsc = false;
@@ -12,57 +18,328 @@ String ansiBuf = "";
 uint16_t currentFG = WHITE;
 uint16_t currentBG = BLACK;
 
-int cursorY = 0;
-const int fontW      = 12;
-const int fontH      = 16;
-const int lineHeight = 16;
+constexpr int fontW = 12;
+constexpr int fontH = 16;
+constexpr int lineHeight = 16;
+
+int termCols = 0;
+int termRows = 0;
+int cursorCol = 0;
+int cursorRow = 0;
+
+std::vector<Cell> screen;
 
 auto &lcd = M5.Display;
 
-void applyTextColor() {
-    lcd.setTextColor(currentFG, currentBG);
+int maxInt(int a, int b) {
+    return a > b ? a : b;
 }
 
-void ensureScroll() {
-    if (cursorY > lcd.height() - lineHeight) {
-        lcd.scroll(0, -lineHeight);
-        cursorY -= lineHeight;
-        lcd.setCursor(lcd.getCursorX(), cursorY);
+int minInt(int a, int b) {
+    return a < b ? a : b;
+}
+
+int indexOf(int row, int col) {
+    return row * termCols + col;
+}
+
+void ensureBuffer() {
+    int cols = maxInt(1, (int)lcd.width() / fontW);
+    int rows = maxInt(1, (int)lcd.height() / lineHeight);
+
+    if (cols == termCols && rows == termRows && screen.size() == (size_t)(cols * rows)) {
+        return;
+    }
+
+    termCols = cols;
+    termRows = rows;
+    cursorCol = 0;
+    cursorRow = 0;
+    screen.assign(termCols * termRows, Cell{});
+}
+
+void drawCell(int row, int col) {
+    if (row < 0 || row >= termRows || col < 0 || col >= termCols) return;
+
+    const Cell &cell = screen[indexOf(row, col)];
+    const int x = col * fontW;
+    const int y = row * lineHeight;
+
+    lcd.fillRect(x, y, fontW, lineHeight, cell.bg);
+    if (cell.ch != ' ') {
+        lcd.setTextColor(cell.fg, cell.bg);
+        lcd.setCursor(x, y);
+        lcd.write(cell.ch);
     }
 }
 
-void terminalNewLine() {
-    lcd.println();
-    cursorY = lcd.getCursorY();
-    ensureScroll();
+void redrawLine(int row) {
+    if (row < 0 || row >= termRows) return;
+    for (int col = 0; col < termCols; ++col) {
+        drawCell(row, col);
+    }
 }
 
-void terminalPutChar(char c) {
+void redrawScreen() {
+    for (int row = 0; row < termRows; ++row) {
+        redrawLine(row);
+    }
+}
+
+void blankCell(int row, int col) {
+    if (row < 0 || row >= termRows || col < 0 || col >= termCols) return;
+    screen[indexOf(row, col)] = Cell{' ', currentFG, currentBG};
+}
+
+void setCell(int row, int col, char ch) {
+    if (row < 0 || row >= termRows || col < 0 || col >= termCols) return;
+    screen[indexOf(row, col)] = Cell{ch, currentFG, currentBG};
+    drawCell(row, col);
+}
+
+void setCursorCell(int col, int row) {
+    cursorCol = constrain(col, 0, maxInt(0, termCols - 1));
+    cursorRow = constrain(row, 0, maxInt(0, termRows - 1));
+    lcd.setCursor(cursorCol * fontW, cursorRow * lineHeight);
+}
+
+void scrollUpOneLine() {
+    if (termRows <= 1) return;
+
+    for (int row = 1; row < termRows; ++row) {
+        for (int col = 0; col < termCols; ++col) {
+            screen[indexOf(row - 1, col)] = screen[indexOf(row, col)];
+        }
+    }
+
+    for (int col = 0; col < termCols; ++col) {
+        blankCell(termRows - 1, col);
+    }
+
+    redrawScreen();
+}
+
+void newLine() {
+    cursorCol = 0;
+    ++cursorRow;
+    if (cursorRow >= termRows) {
+        cursorRow = termRows - 1;
+        scrollUpOneLine();
+    }
+    setCursorCell(cursorCol, cursorRow);
+}
+
+void putChar(char c) {
+    ensureBuffer();
+
     if (c == '\r') {
-        lcd.setCursor(0, lcd.getCursorY());
-        return;
-    }
-    if (c == '\n') {
-        terminalNewLine();
+        setCursorCell(0, cursorRow);
         return;
     }
 
-    lcd.write(c);
-    cursorY = lcd.getCursorY();
-    ensureScroll();
+    if (c == '\n') {
+        newLine();
+        return;
+    }
+
+    if (c == '\t') {
+        int spaces = 4 - (cursorCol % 4);
+        while (spaces-- > 0) putChar(' ');
+        return;
+    }
+
+    if (c < 0x20) return;
+
+    setCell(cursorRow, cursorCol, c);
+    ++cursorCol;
+    if (cursorCol >= termCols) {
+        newLine();
+    } else {
+        setCursorCell(cursorCol, cursorRow);
+    }
+}
+
+void clearScreen() {
+    ensureBuffer();
+    for (int row = 0; row < termRows; ++row) {
+        for (int col = 0; col < termCols; ++col) {
+            blankCell(row, col);
+        }
+    }
+    lcd.fillScreen(currentBG);
+    setCursorCell(0, 0);
+}
+
+void clearScreenRange(int fromRow, int fromCol, int toRow, int toCol) {
+    ensureBuffer();
+    if (termRows <= 0 || termCols <= 0) return;
+
+    fromRow = constrain(fromRow, 0, termRows - 1);
+    toRow = constrain(toRow, 0, termRows - 1);
+    fromCol = constrain(fromCol, 0, termCols - 1);
+    toCol = constrain(toCol, 0, termCols - 1);
+    if (fromRow > toRow) return;
+
+    for (int row = fromRow; row <= toRow; ++row) {
+        int startCol = (row == fromRow) ? fromCol : 0;
+        int endCol = (row == toRow) ? toCol : termCols - 1;
+        for (int col = startCol; col <= endCol; ++col) {
+            blankCell(row, col);
+            drawCell(row, col);
+        }
+    }
+}
+
+void clearLineRange(int row, int fromCol, int toCol) {
+    ensureBuffer();
+    if (row < 0 || row >= termRows) return;
+
+    fromCol = constrain(fromCol, 0, maxInt(0, termCols - 1));
+    toCol = constrain(toCol, 0, maxInt(0, termCols - 1));
+    if (fromCol > toCol) return;
+
+    for (int col = fromCol; col <= toCol; ++col) {
+        blankCell(row, col);
+        drawCell(row, col);
+    }
+}
+
+void deleteChars(int count) {
+    ensureBuffer();
+    count = maxInt(1, count);
+    if (cursorRow < 0 || cursorRow >= termRows || cursorCol >= termCols) return;
+
+    for (int col = cursorCol; col < termCols; ++col) {
+        int src = col + count;
+        if (src < termCols) {
+            screen[indexOf(cursorRow, col)] = screen[indexOf(cursorRow, src)];
+        } else {
+            screen[indexOf(cursorRow, col)] = Cell{' ', currentFG, currentBG};
+        }
+    }
+    redrawLine(cursorRow);
+}
+
+void insertBlankChars(int count) {
+    ensureBuffer();
+    count = maxInt(1, count);
+    if (cursorRow < 0 || cursorRow >= termRows || cursorCol >= termCols) return;
+
+    for (int col = termCols - 1; col >= cursorCol; --col) {
+        int src = col - count;
+        if (src >= cursorCol) {
+            screen[indexOf(cursorRow, col)] = screen[indexOf(cursorRow, src)];
+        } else {
+            screen[indexOf(cursorRow, col)] = Cell{' ', currentFG, currentBG};
+        }
+    }
+    redrawLine(cursorRow);
+}
+
+std::vector<int> parseParams(const String &params) {
+    std::vector<int> result;
+    if (!params.length()) {
+        result.push_back(0);
+        return result;
+    }
+
+    int start = 0;
+    while (start <= params.length()) {
+        int p = params.indexOf(';', start);
+        String token = (p < 0) ? params.substring(start) : params.substring(start, p);
+        result.push_back(token.length() ? token.toInt() : 0);
+        if (p < 0) break;
+        start = p + 1;
+    }
+    return result;
+}
+
+int paramOrDefault(const std::vector<int> &params, size_t index, int def) {
+    if (index >= params.size() || params[index] <= 0) return def;
+    return params[index];
+}
+
+void applySgr(const std::vector<int> &params) {
+    static uint16_t colorMap[8] = {BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE};
+
+    for (int v : params) {
+        if (v == 0) {
+            currentFG = WHITE;
+            currentBG = BLACK;
+        } else if (30 <= v && v <= 37) {
+            currentFG = colorMap[v - 30];
+        } else if (40 <= v && v <= 47) {
+            currentBG = colorMap[v - 40];
+        } else if (90 <= v && v <= 97) {
+            currentFG = colorMap[v - 90];
+        } else if (100 <= v && v <= 107) {
+            currentBG = colorMap[v - 100];
+        }
+    }
+}
+
+void handleCsi(char cmd, const String &rawParams) {
+    ensureBuffer();
+    std::vector<int> params = parseParams(rawParams);
+
+    if (cmd == 'H' || cmd == 'f') {
+        int row = paramOrDefault(params, 0, 1);
+        int col = paramOrDefault(params, 1, 1);
+        setCursorCell(col - 1, row - 1);
+    } else if (cmd == 'J') {
+        int mode = paramOrDefault(params, 0, 0);
+        if (mode == 0) {
+            clearScreenRange(cursorRow, cursorCol, termRows - 1, termCols - 1);
+        } else if (mode == 1) {
+            clearScreenRange(0, 0, cursorRow, cursorCol);
+        } else if (mode == 2) {
+            clearScreen();
+        }
+    } else if (cmd == 'K') {
+        int mode = paramOrDefault(params, 0, 0);
+        if (mode == 0) {
+            clearLineRange(cursorRow, cursorCol, termCols - 1);
+        } else if (mode == 1) {
+            clearLineRange(cursorRow, 0, cursorCol);
+        } else if (mode == 2) {
+            clearLineRange(cursorRow, 0, termCols - 1);
+        }
+    } else if (cmd == 'A') {
+        setCursorCell(cursorCol, cursorRow - paramOrDefault(params, 0, 1));
+    } else if (cmd == 'B') {
+        setCursorCell(cursorCol, cursorRow + paramOrDefault(params, 0, 1));
+    } else if (cmd == 'C') {
+        setCursorCell(cursorCol + paramOrDefault(params, 0, 1), cursorRow);
+    } else if (cmd == 'D') {
+        setCursorCell(cursorCol - paramOrDefault(params, 0, 1), cursorRow);
+    } else if (cmd == 'G') {
+        setCursorCell(paramOrDefault(params, 0, 1) - 1, cursorRow);
+    } else if (cmd == 'P') {
+        deleteChars(paramOrDefault(params, 0, 1));
+    } else if (cmd == '@') {
+        insertBlankChars(paramOrDefault(params, 0, 1));
+    } else if (cmd == 'X') {
+        int count = paramOrDefault(params, 0, 1);
+        clearLineRange(cursorRow, cursorCol, minInt(termCols - 1, cursorCol + count - 1));
+    } else if (cmd == 'm') {
+        applySgr(params);
+    }
+}
+
+void resetAnsiState() {
+    ansiInEsc = false;
+    ansiInCsi = false;
+    ansiBuf = "";
 }
 
 } // namespace
 
 void handleSshChar(char c)
 {
-    if (c == 0x08) {
-        int cx = lcd.getCursorX();
-        int cy = lcd.getCursorY();
-        if (cx >= fontW) {
-            lcd.setCursor(cx - fontW, cy);
-            cursorY = cy;
-        }
+    ensureBuffer();
+
+    if (c == 0x08 || c == 0x7F) {
+        setCursorCell(cursorCol - 1, cursorRow);
         return;
     }
 
@@ -78,7 +355,7 @@ void handleSshChar(char c)
             ansiBuf = "";
             return;
         }
-        terminalPutChar(c);
+        putChar(c);
         return;
     }
 
@@ -93,123 +370,15 @@ void handleSshChar(char c)
             ansiInEsc = false;
             return;
         }
-        ansiInEsc = false;
+        resetAnsiState();
         return;
     }
 
     ansiBuf += c;
-
     if (c < 0x40 || c > 0x7E) return;
 
-    char cmd = c;
-    String params = ansiBuf.substring(0, ansiBuf.length() - 1);
-
-    auto parseN = [&](int def = 1) {
-        if (!params.length()) return def;
-        int v = params.toInt();
-        return v <= 0 ? def : v;
-    };
-
-    if (cmd == 'H' || cmd == 'f') {
-        int row = 1, col = 1;
-        int sp = params.indexOf(';');
-        if (sp >= 0) {
-            row = params.substring(0, sp).toInt();
-            col = params.substring(sp + 1).toInt();
-        } else if (params.length()) {
-            row = params.toInt();
-        }
-
-        row = max(1, row);
-        col = max(1, col);
-
-        int x = constrain((col - 1) * fontW, 0, lcd.width() - fontW);
-        int y = constrain((row - 1) * fontH, 0, lcd.height() - lineHeight);
-
-        lcd.setCursor(x, y);
-        cursorY = y;
-    }
-    else if (cmd == 'J') {
-        if (params == "2" || params == "") {
-            lcd.fillScreen(BLACK);
-            lcd.setCursor(0, 0);
-            cursorY = 0;
-        }
-    }
-    else if (cmd == 'K') {
-        int mode = params.length() ? params.toInt() : 0;
-        int cx = lcd.getCursorX();
-        int cy = lcd.getCursorY();
-
-        if (mode == 0)
-            lcd.fillRect(cx, cy, lcd.width() - cx, lineHeight, currentBG);
-        else if (mode == 1)
-            lcd.fillRect(0, cy, cx, lineHeight, currentBG);
-        else if (mode == 2)
-            lcd.fillRect(0, cy, lcd.width(), lineHeight, currentBG);
-
-        lcd.setCursor(cx, cy);
-        cursorY = cy;
-    }
-    else if (cmd == 'A') {
-        int cx = lcd.getCursorX();
-        int cy = max(0, (int)(lcd.getCursorY() - parseN() * lineHeight));
-        lcd.setCursor(cx, cy);
-        cursorY = cy;
-    }
-    else if (cmd == 'B') {
-        int cx = lcd.getCursorX();
-        int cy = min((int)(lcd.height() - lineHeight), (int)(lcd.getCursorY() + parseN() * lineHeight));
-        lcd.setCursor(cx, cy);
-        cursorY = cy;
-    }
-    else if (cmd == 'C') {
-        int cx = min((int)(lcd.width() - fontW), (int)(lcd.getCursorX() + parseN() * fontW));
-        lcd.setCursor(cx, lcd.getCursorY());
-    }
-    else if (cmd == 'D') {
-        int cx = max(0, (int)(lcd.getCursorX() - parseN() * fontW));
-        lcd.setCursor(cx, lcd.getCursorY());
-    }
-    else if (cmd == 'm') {
-        std::vector<int> ps;
-        if (params.length()) {
-            int start = 0;
-            while (true) {
-                int p = params.indexOf(';', start);
-                if (p < 0) {
-                    ps.push_back(params.substring(start).toInt());
-                    break;
-                }
-                ps.push_back(params.substring(start, p).toInt());
-                start = p + 1;
-            }
-        } else {
-            ps.push_back(0);
-        }
-
-        for (int v : ps) {
-            if (v == 0) {
-                currentFG = WHITE;
-                currentBG = BLACK;
-                applyTextColor();
-            }
-            else if (30 <= v && v <= 37) {
-                static uint16_t fgMap[8] = {BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE};
-                currentFG = fgMap[v - 30];
-                applyTextColor();
-            }
-            else if (40 <= v && v <= 47) {
-                static uint16_t bgMap[8] = {BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE};
-                currentBG = bgMap[v - 40];
-                applyTextColor();
-            }
-        }
-    }
-
-    ansiInEsc = false;
-    ansiInCsi = false;
-    ansiBuf = "";
+    handleCsi(c, ansiBuf.substring(0, ansiBuf.length() - 1));
+    resetAnsiState();
 }
 
 void termPrint(const String &s) {
@@ -226,13 +395,7 @@ void termPrintln(const String &s) {
 }
 
 void termClear() {
-    handleSshChar(0x1B);
-    handleSshChar('[');
-    handleSshChar('2');
-    handleSshChar('J');
-    handleSshChar(0x1B);
-    handleSshChar('[');
-    handleSshChar('H');
+    clearScreen();
     termFlush();
 }
 

@@ -34,7 +34,7 @@ constexpr int8_t TAB5_KEYBOARD_SCL = 1;
 constexpr uint32_t TAB5_KEYBOARD_I2C_CLOCK = 400000UL;
 constexpr uint8_t DISPLAY_BRIGHTNESS = 180;
 constexpr uint8_t TERMINAL_FONT_WIDTH = 12;
-constexpr uint8_t TERMINAL_LINE_HEIGHT = 16;
+constexpr uint8_t TERMINAL_LINE_HEIGHT = 24;
 
 constexpr uint8_t HID_BACKSPACE = 0x2A;
 constexpr uint8_t HID_TAB       = 0x2B;

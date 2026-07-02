@@ -8,6 +8,7 @@ An experimental Arduino VNC client for M5Stack Tab5. It uses the Tab5 display, t
 
 - Supports TigerVNC classic `VncAuth` password authentication.
 - Supports Tab5 1280x720 RGB565 display output.
+- Supports incremental updates, batched pixel upload, local CopyRect blits, and deferred large-area flushes.
 - Supports basic Tab5 Keyboard input.
 - Supports touch short press as left click and long press as right click.
 - Does not support modern encrypted VNC authentication, username login, clipboard, audio, or USB keyboard/mouse.

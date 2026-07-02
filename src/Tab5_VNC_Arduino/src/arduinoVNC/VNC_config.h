@@ -63,8 +63,8 @@
 //#define VNC_SAVE_MEMORY
 
 #ifndef VNC_SAVE_MEMORY
-// 15KB raw input buffer
-#define VNC_RAW_BUFFER 15360
+// Larger RAW chunks reduce per-line display flush overhead on 1280x720 Tab5.
+#define VNC_RAW_BUFFER 65536
 #endif
 
 /// debugging

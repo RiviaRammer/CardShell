@@ -7,6 +7,8 @@
 #include <M5UnitUnifiedKEYBOARD.h>
 #include <utility/hid_keycode.hpp>
 
+#include <esp_heap_caps.h>
+
 #include "src/arduinoVNC/VNC.h"
 #include "config.h"
 
@@ -25,6 +27,8 @@ constexpr uint16_t VNC_CLIENT_WIDTH = VNC_CONFIG_WIDTH;
 constexpr uint16_t VNC_CLIENT_HEIGHT = VNC_CONFIG_HEIGHT;
 constexpr uint16_t TOUCH_MOVE_DEADZONE = 3;
 constexpr uint32_t TOUCH_LONG_PRESS_MS = 650;
+constexpr uint16_t DISPLAY_BATCH_LINES = 16;
+constexpr uint32_t DEFERRED_FLUSH_MIN_PIXELS = 80000;
 
 constexpr int8_t TAB5_KEYBOARD_SDA = 0;
 constexpr int8_t TAB5_KEYBOARD_SCL = 1;
@@ -66,8 +70,28 @@ uint32_t touchStartMs = 0;
 
 class Tab5VNCDisplay final : public VNCdisplay {
 public:
+    bool beginFramebuffer() {
+        if (framebuffer != nullptr) {
+            return true;
+        }
+
+        const uint32_t bytes = static_cast<uint32_t>(VNC_CLIENT_WIDTH) * VNC_CLIENT_HEIGHT * sizeof(uint16_t);
+        framebuffer = static_cast<uint16_t *>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (framebuffer == nullptr) {
+            Serial.printf("[Display] framebuffer allocation failed: %lu bytes\n", static_cast<unsigned long>(bytes));
+            return false;
+        }
+
+        memset(framebuffer, 0, bytes);
+        Serial.printf("[Display] framebuffer ready: %lux%lu, %lu bytes\n",
+                      static_cast<unsigned long>(VNC_CLIENT_WIDTH),
+                      static_cast<unsigned long>(VNC_CLIENT_HEIGHT),
+                      static_cast<unsigned long>(bytes));
+        return true;
+    }
+
     bool hasCopyRect() override {
-        return false;
+        return framebuffer != nullptr;
     }
 
     uint32_t getHeight() override {
@@ -83,10 +107,44 @@ public:
     }
 
     void draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t color) override {
-        M5.Display.fillRect(toDisplayX(x), toDisplayY(y), scaleW(w), scaleH(h), convertColor(color));
+        const uint16_t converted = convertColor(color);
+        fillFramebuffer(x, y, w, h, converted);
+        M5.Display.fillRect(toDisplayX(x), toDisplayY(y), scaleW(w), scaleH(h), converted);
     }
 
-    void copy_rect(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) override {
+    void copy_rect(uint32_t srcX, uint32_t srcY, uint32_t destX, uint32_t destY, uint32_t w, uint32_t h) override {
+        if (framebuffer == nullptr || w == 0 || h == 0) {
+            return;
+        }
+
+        if (srcX >= VNC_CLIENT_WIDTH || destX >= VNC_CLIENT_WIDTH ||
+            srcY >= VNC_CLIENT_HEIGHT || destY >= VNC_CLIENT_HEIGHT) {
+            return;
+        }
+
+        w = min<uint32_t>(w, VNC_CLIENT_WIDTH - srcX);
+        w = min<uint32_t>(w, VNC_CLIENT_WIDTH - destX);
+        h = min<uint32_t>(h, VNC_CLIENT_HEIGHT - srcY);
+        h = min<uint32_t>(h, VNC_CLIENT_HEIGHT - destY);
+        if (w == 0 || h == 0) {
+            return;
+        }
+
+        if (destY > srcY) {
+            for (int32_t row = static_cast<int32_t>(h) - 1; row >= 0; --row) {
+                memmove(framebuffer + (destY + row) * VNC_CLIENT_WIDTH + destX,
+                        framebuffer + (srcY + row) * VNC_CLIENT_WIDTH + srcX,
+                        w * sizeof(uint16_t));
+            }
+        } else {
+            for (uint32_t row = 0; row < h; ++row) {
+                memmove(framebuffer + (destY + row) * VNC_CLIENT_WIDTH + destX,
+                        framebuffer + (srcY + row) * VNC_CLIENT_WIDTH + srcX,
+                        w * sizeof(uint16_t));
+            }
+        }
+
+        pushFramebufferBlock(destX, destY, w, h);
     }
 
     void area_update_start(uint32_t x, uint32_t y, uint32_t w, uint32_t h) override {
@@ -95,6 +153,7 @@ public:
         areaW = w;
         areaH = h;
         areaPixel = 0;
+        deferAreaFlush = framebuffer != nullptr && (w * h) >= DEFERRED_FLUSH_MIN_PIXELS;
     }
 
     void area_update_data(char *data, uint32_t pixels) override {
@@ -106,12 +165,22 @@ public:
         while (pixels > 0 && areaPixel < areaW * areaH) {
             const uint32_t rowOffset = areaPixel % areaW;
             const uint32_t rowRemain = areaW - rowOffset;
-            const uint32_t chunk = min<uint32_t>(pixels, rowRemain);
             const uint32_t x = areaX + rowOffset;
             const uint32_t y = areaY + (areaPixel / areaW);
 
-            drawRgb565Block(x, y, chunk, 1, src);
+            if (rowOffset == 0 && pixels >= areaW) {
+                const uint32_t rows = min<uint32_t>(pixels / areaW, (areaW * areaH - areaPixel) / areaW);
+                const uint32_t batchRows = min<uint32_t>(rows, DISPLAY_BATCH_LINES);
+                const uint32_t chunk = batchRows * areaW;
+                drawRgb565Block(x, y, areaW, batchRows, src, !deferAreaFlush);
+                src += chunk;
+                areaPixel += chunk;
+                pixels -= chunk;
+                continue;
+            }
 
+            const uint32_t chunk = min<uint32_t>(pixels, rowRemain);
+            drawRgb565Block(x, y, chunk, 1, src, !deferAreaFlush);
             src += chunk;
             areaPixel += chunk;
             pixels -= chunk;
@@ -119,6 +188,10 @@ public:
     }
 
     void area_update_end() override {
+        if (deferAreaFlush) {
+            pushFramebufferBlock(areaX, areaY, areaW, areaH);
+            deferAreaFlush = false;
+        }
     }
 
     void vnc_options_override(dfb_vnc_options *opt) override {
@@ -161,26 +234,44 @@ private:
         return max<uint32_t>(1, h * scaleY());
     }
 
-    void drawRgb565Block(uint32_t x, uint32_t y, uint32_t w, uint32_t h, const uint16_t *src) {
+    void drawRgb565Block(uint32_t x, uint32_t y, uint32_t w, uint32_t h, const uint16_t *src, bool flushToDisplay = true) {
         const uint32_t sx = scaleX();
         const uint32_t sy = scaleY();
+        static uint16_t batchBuffer[1280 * DISPLAY_BATCH_LINES];
         static uint16_t scaledLine[1280];
 
         if (sx == 1 && sy == 1) {
-            convertLine(src, scaledLine, w);
-            M5.Display.pushImage(x, y, w, 1, scaledLine);
-            for (uint32_t row = 1; row < h; ++row) {
-                convertLine(src + row * w, scaledLine, w);
-                M5.Display.pushImage(x, y + row, w, 1, scaledLine);
+            uint32_t row = 0;
+            if (flushToDisplay) {
+                M5.Display.startWrite();
+            }
+            while (row < h) {
+                const uint32_t rows = min<uint32_t>(h - row, DISPLAY_BATCH_LINES);
+                convertBlock(src + row * w, batchBuffer, w * rows);
+                writeFramebuffer(x, y + row, w, rows, batchBuffer, w);
+                if (flushToDisplay) {
+                    M5.Display.pushImage(x, y + row, w, rows, batchBuffer);
+                }
+                row += rows;
+            }
+            if (flushToDisplay) {
+                M5.Display.endWrite();
             }
             return;
         }
 
         const uint32_t outW = min<uint32_t>(w * sx, 1280);
 
+        if (flushToDisplay) {
+            M5.Display.startWrite();
+        }
         for (uint32_t row = 0; row < h; ++row) {
             uint32_t out = 0;
             const uint16_t *srcLine = src + row * w;
+            writeFramebufferLine(x, y + row, w, srcLine);
+            if (!flushToDisplay) {
+                continue;
+            }
             for (uint32_t col = 0; col < w && out < outW; ++col) {
                 const uint16_t color = convertColor(srcLine[col]);
                 for (uint32_t repeat = 0; repeat < sx && out < outW; ++repeat) {
@@ -193,6 +284,44 @@ private:
                 M5.Display.pushImage(toDisplayX(x), dy + repeatY, outW, 1, scaledLine);
             }
         }
+        if (flushToDisplay) {
+            M5.Display.endWrite();
+        }
+    }
+
+    void pushFramebufferBlock(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+        if (framebuffer == nullptr) {
+            return;
+        }
+
+        const uint32_t sx = scaleX();
+        const uint32_t sy = scaleY();
+        static uint16_t batchBuffer[1280 * DISPLAY_BATCH_LINES];
+        static uint16_t scaledLine[1280];
+
+        if (sx == 1 && sy == 1) {
+            uint32_t row = 0;
+            M5.Display.startWrite();
+            while (row < h) {
+                const uint32_t rows = min<uint32_t>(h - row, DISPLAY_BATCH_LINES);
+                copyFramebufferRows(x, y + row, w, rows, batchBuffer);
+                M5.Display.pushImage(x, y + row, w, rows, batchBuffer);
+                row += rows;
+            }
+            M5.Display.endWrite();
+            return;
+        }
+
+        M5.Display.startWrite();
+        for (uint32_t row = 0; row < h; ++row) {
+            const uint16_t *srcLine = framebuffer + (y + row) * VNC_CLIENT_WIDTH + x;
+            const uint32_t outW = expandConvertedLine(srcLine, w, sx, scaledLine, 1280);
+            const uint32_t dy = toDisplayY(y + row);
+            for (uint32_t repeatY = 0; repeatY < sy; ++repeatY) {
+                M5.Display.pushImage(toDisplayX(x), dy + repeatY, outW, 1, scaledLine);
+            }
+        }
+        M5.Display.endWrite();
     }
 
     static uint16_t convertColor(uint16_t color) {
@@ -205,11 +334,76 @@ private:
         }
     }
 
+    static void convertBlock(const uint16_t *src, uint16_t *dst, uint32_t count) {
+        convertLine(src, dst, count);
+    }
+
+    static uint32_t expandConvertedLine(const uint16_t *src, uint32_t count, uint32_t scale, uint16_t *dst, uint32_t maxCount) {
+        uint32_t out = 0;
+        for (uint32_t col = 0; col < count && out < maxCount; ++col) {
+            for (uint32_t repeat = 0; repeat < scale && out < maxCount; ++repeat) {
+                dst[out++] = src[col];
+            }
+        }
+        return out;
+    }
+
+    void writeFramebuffer(uint32_t x, uint32_t y, uint32_t w, uint32_t h, const uint16_t *src, uint32_t srcStride) {
+        if (framebuffer == nullptr || x >= VNC_CLIENT_WIDTH || y >= VNC_CLIENT_HEIGHT) {
+            return;
+        }
+
+        w = min<uint32_t>(w, VNC_CLIENT_WIDTH - x);
+        h = min<uint32_t>(h, VNC_CLIENT_HEIGHT - y);
+        for (uint32_t row = 0; row < h; ++row) {
+            memcpy(framebuffer + (y + row) * VNC_CLIENT_WIDTH + x,
+                   src + row * srcStride,
+                   w * sizeof(uint16_t));
+        }
+    }
+
+    void writeFramebufferLine(uint32_t x, uint32_t y, uint32_t w, const uint16_t *src) {
+        if (framebuffer == nullptr || x >= VNC_CLIENT_WIDTH || y >= VNC_CLIENT_HEIGHT) {
+            return;
+        }
+
+        w = min<uint32_t>(w, VNC_CLIENT_WIDTH - x);
+        uint16_t *dst = framebuffer + y * VNC_CLIENT_WIDTH + x;
+        for (uint32_t i = 0; i < w; ++i) {
+            dst[i] = convertColor(src[i]);
+        }
+    }
+
+    void fillFramebuffer(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t color) {
+        if (framebuffer == nullptr || x >= VNC_CLIENT_WIDTH || y >= VNC_CLIENT_HEIGHT) {
+            return;
+        }
+
+        w = min<uint32_t>(w, VNC_CLIENT_WIDTH - x);
+        h = min<uint32_t>(h, VNC_CLIENT_HEIGHT - y);
+        for (uint32_t row = 0; row < h; ++row) {
+            uint16_t *dst = framebuffer + (y + row) * VNC_CLIENT_WIDTH + x;
+            for (uint32_t col = 0; col < w; ++col) {
+                dst[col] = color;
+            }
+        }
+    }
+
+    void copyFramebufferRows(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t *dst) {
+        for (uint32_t row = 0; row < h; ++row) {
+            memcpy(dst + row * w,
+                   framebuffer + (y + row) * VNC_CLIENT_WIDTH + x,
+                   w * sizeof(uint16_t));
+        }
+    }
+
     uint32_t areaX = 0;
     uint32_t areaY = 0;
     uint32_t areaW = 0;
     uint32_t areaH = 0;
     uint32_t areaPixel = 0;
+    bool deferAreaFlush = false;
+    uint16_t *framebuffer = nullptr;
 };
 
 Tab5VNCDisplay display;
@@ -379,6 +573,7 @@ void setup() {
     M5.begin(cfg);
 
     setupDisplay();
+    display.beginFramebuffer();
     setupTab5WiFiPins();
 
     if (!setupTab5Keyboard()) {
@@ -392,8 +587,8 @@ void setup() {
     }
 
     vnc.setPassword(VNC_PASSWORD);
-    vnc.setMaxFPS(15);
-    vnc.begin(VNC_HOST, VNC_PORT, true);
+    vnc.setMaxFPS(20);
+    vnc.begin(VNC_HOST, VNC_PORT, false);
 }
 
 void loop() {

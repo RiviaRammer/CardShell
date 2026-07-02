@@ -734,6 +734,15 @@ bool arduinoVNC::rfb_set_format_and_encodings() {
     enc[num_enc++] = Swap32IfLE(rfbEncodingTight);
     DEBUG_VNC(" - Tight\n");
 #endif
+
+    if(display->hasCopyRect()) {
+        enc[num_enc++] = Swap32IfLE(rfbEncodingCopyRect);
+        DEBUG_VNC(" - CopyRect\n");
+    }
+
+    enc[num_enc++] = Swap32IfLE(rfbEncodingRaw);
+    DEBUG_VNC(" - Raw\n");
+
 #ifdef VNC_HEXTILE
     enc[num_enc++] = Swap32IfLE(rfbEncodingHextile);
     DEBUG_VNC(" - Hextile\n");
@@ -743,11 +752,6 @@ bool arduinoVNC::rfb_set_format_and_encodings() {
     DEBUG_VNC(" - Zlib\n");
 #endif
 
-    if(display->hasCopyRect()) {
-        enc[num_enc++] = Swap32IfLE(rfbEncodingCopyRect);
-        DEBUG_VNC(" - CopyRect\n");
-    }
-
 #ifdef VNC_RRE
     enc[num_enc++] = Swap32IfLE(rfbEncodingRRE);
     DEBUG_VNC(" - RRE\n");
@@ -756,9 +760,6 @@ bool arduinoVNC::rfb_set_format_and_encodings() {
     enc[num_enc++] = Swap32IfLE(rfbEncodingCoRRE);
     DEBUG_VNC(" - CoRRE\n");
 #endif
-
-    enc[num_enc++] = Swap32IfLE(rfbEncodingRaw);
-    DEBUG_VNC(" - Raw\n");
 
     DEBUG_VNC("[VNC-CLIENT] Supported Special Encodings:\n");
 

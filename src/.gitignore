@@ -1,0 +1,4 @@
+# Ignore PlatformIO generated secrets (if any)
+Cardputer_CLI_Arduino/config.h
+Tab5_CLI_Arduino/config.h
+Tab5_VNC_Arduino/config.h

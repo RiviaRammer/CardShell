@@ -927,3 +927,10 @@ void termFlush() {
     drawCursor();
     lcd.display();
 }
+
+void termRedraw() {
+    hideDrawnCursor();
+    redrawScreen();
+    drawCursor();
+    lcd.display();
+}

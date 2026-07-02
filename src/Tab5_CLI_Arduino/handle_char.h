@@ -7,3 +7,4 @@ void termPrint(const String &s);
 void termPrintln(const String &s);
 void termClear();
 void termFlush();
+void termRedraw();
